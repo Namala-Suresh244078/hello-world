@@ -163,3 +163,55 @@ public class BatchConfig {
                 .build();
     }
 }
+public long countLines(String filePath) throws IOException {
+    try (Stream<String> lines = Files.lines(Paths.get(filePath))) {
+        return lines.skip(1).count(); // Skip header
+    }
+}
+
+@Component
+public class LineCountListener implements JobExecutionListener {
+
+    @Value("${input.file}")
+    private String inputFile;
+
+    @Override
+    public void beforeJob(JobExecution jobExecution) {
+        try {
+            long count = Files.lines(Paths.get(inputFile)).skip(1).count();
+            System.out.println("Total data lines (excluding header): " + count);
+            jobExecution.getExecutionContext().putLong("lineCount", count);
+        } catch (IOException e) {
+            throw new RuntimeException("Failed to count lines", e);
+        }
+    }
+
+    @Override
+    public void afterJob(JobExecution jobExecution) {
+        // Optional: compare with processed count
+    }
+}
+@Bean
+public Step step1(StepBuilderFactory steps,
+                  FlatFileItemReader<MyEntity> reader,
+                  MyEntityProcessor processor,
+                  MyEntityWriter writer) {
+    return steps.get("step1")
+            .<MyEntity, MyEntity>chunk(10)
+            .reader(reader)
+            .processor(processor)
+            .writer(writer)
+            .listener(new StepExecutionListener() {
+                @Override
+                public void beforeStep(StepExecution stepExecution) {}
+
+                @Override
+                public ExitStatus afterStep(StepExecution stepExecution) {
+                    System.out.println("Items read: " + stepExecution.getReadCount());
+                    return ExitStatus.COMPLETED;
+                }
+            })
+            .build();
+}
+jobExecution.getExecutionContext().putLong("lineCount", actualLineCount);
+Long count = stepExecution.getJobExecution().getExecutionContext().getLong("lineCount");
