@@ -1,3 +1,149 @@
+Customizing Spring Batch FlatFileItemReader for Complex Line Reading Issues (e.g., Unmatched Quotes)
+The Problem: Lines Merging Due to Unmatched Quotes
+You've encountered a common issue with FlatFileItemReader when dealing with files that have malformed or unexpected double quotes. For example:
+
+line1 "data1","Data2"
+line 2 "data1",""Data2"
+line3  "data1",""Data2"
+line4 "data1","Data2"
+In this scenario, line 2 and line 3 might be merged into a single record by the FlatFileItemReader. This happens because Spring Batch's default LineTokenizer (like DelimitedLineTokenizer) interprets the first " as opening a quoted field. The "" is typically seen as an escaped quote within that field. If a closing " is not found on the same line, the reader assumes the field (and thus the record) continues onto the next line, leading to line merging.
+
+The good news: You generally do not need to change the FlatFileItemReader itself. The issue lies in how the reader determines the boundaries of a "record" or "line," which is controlled by the RecordSeparatorPolicy.
+
+The Solution: Custom RecordSeparatorPolicy
+The FlatFileItemReader uses a RecordSeparatorPolicy to define when a logical record ends. To prevent line merging due to misinterpretations of double quotes across lines, you need a policy that treats every physical line as a separate record, regardless of quote status.
+
+Step 1: Create a Custom RecordSeparatorPolicy
+Implement the RecordSeparatorPolicy interface. The simplest way to achieve "read every physical line as a record" behavior is to always return true from the isEndOfRecord method.
+
+Java
+
+import org.springframework.batch.item.file.separator.RecordSeparatorPolicy;
+import org.springframework.util.StringUtils;
+
+public class AlwaysSeparateRecordSeparatorPolicy implements RecordSeparatorPolicy {
+
+    @Override
+    public boolean isEndOfRecord(String line) {
+        // This policy always treats every physical line as the end of a record.
+        // It prevents Spring Batch from looking for unterminated quotes
+        // across lines that would otherwise cause merging.
+        return true;
+    }
+
+    @Override
+    public String postProcess(String record) {
+        // No post-processing needed for this specific problem.
+        return record;
+    }
+
+    @Override
+    public String preProcess(String record) {
+        // No pre-processing needed for this specific problem.
+        return record;
+    }
+}
+Step 2: Configure FlatFileItemReader with your Custom RecordSeparatorPolicy
+Integrate your custom policy into your FlatFileItemReader configuration.
+
+Java
+
+import org.springframework.batch.item.file.FlatFileItemReader;
+import org.springframework.batch.item.file.builder.FlatFileItemReaderBuilder;
+import org.springframework.batch.item.file.mapping.PassThroughLineMapper; // Or your custom LineMapper
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.core.io.ClassPathResource;
+
+@Configuration
+public class BatchConfig {
+
+    @Bean
+    public FlatFileItemReader<String> flatFileItemReaderWithCustomSeparatorPolicy() {
+        return new FlatFileItemReaderBuilder<String>()
+                .name("flatFileItemReaderWithCustomSeparatorPolicy")
+                .resource(new ClassPathResource("input.txt")) // Your input file resource
+                // Set your custom RecordSeparatorPolicy here
+                .recordSeparatorPolicy(new AlwaysSeparateRecordSeparatorPolicy())
+                // Use PassThroughLineMapper if you want the raw String line for further processing.
+                // Alternatively, use your custom LineMapper (as shown below) for direct object mapping.
+                .lineMapper(new PassThroughLineMapper())
+                .build();
+    }
+
+    // If you need to map the separated lines into a specific domain object,
+    // you would combine this with your custom LineMapper:
+    @Bean
+    public FlatFileItemReader<MyDomainObject> flatFileItemReaderWithCustomLineMapper() {
+        return new FlatFileItemReaderBuilder<MyDomainObject>()
+                .name("flatFileItemReaderWithCustomLineMapper")
+                .resource(new ClassPathResource("input.txt"))
+                .recordSeparatorPolicy(new AlwaysSeparateRecordSeparatorPolicy()) // Crucial for correct line separation
+                .lineMapper(new MyCustomLineMapper()) // Your custom LineMapper for actual parsing
+                .build();
+    }
+
+    // ... other Spring Batch job and step configurations
+}
+Step 3: Refine Your LineMapper for Content Parsing
+Once the FlatFileItemReader correctly separates each physical line using your AlwaysSeparateRecordSeparatorPolicy, your LineMapper will receive each line individually. You will then need to implement the logic within your LineMapper to parse the content of these lines, specifically handling the "extra" or misplaced double quotes.
+
+Example of MyCustomLineMapper (assuming MyDomainObject has type and value fields):
+
+Java
+
+import org.springframework.batch.item.file.LineMapper;
+
+public class MyDomainObject {
+    private String type;
+    private String value;
+
+    public MyDomainObject(String type, String value) {
+        this.type = type;
+        this.value = value;
+    }
+
+    // Getters, Setters, and toString() omitted for brevity
+}
+
+public class MyCustomLineMapper implements LineMapper<MyDomainObject> {
+
+    @Override
+    public MyDomainObject mapLine(String line, int lineNumber) throws Exception {
+        System.out.println("Processing line (after separation by policy): " + line);
+
+        // Your custom logic to parse the 'line' String.
+        // This is where you address the problematic double quotes within the data.
+
+        // Example: For "data1",""Data2"
+        String[] parts = line.split(",");
+        if (parts.length == 2) {
+            String part1 = parts[0].replaceAll("^\"|\"$", ""); // Remove leading/trailing quotes
+            String part2 = parts[1].replaceAll("^\"|\"$", ""); // Remove leading/trailing quotes
+
+            // Specific handling for "" within the data
+            part2 = part2.replace("\"\"", "\""); // Replace "" with a single "
+
+            return new MyDomainObject(part1, part2);
+        } else {
+            // Handle lines that don't match your expected two-part format
+            throw new IllegalArgumentException("Unexpected line format at line " + lineNumber + ": " + line);
+        }
+    }
+}
+Summary and Recommendations:
+Do NOT extend FlatFileItemReader or write a completely custom ItemReader for this problem. The existing FlatFileItemReader is highly configurable and designed for this exact type of customization. Overriding its core behavior would lead to losing valuable features like restartability, comment skipping, etc., which you'd then have to re-implement.
+
+Focus on the RecordSeparatorPolicy first. This is the key to ensuring that your lines are read individually without merging. The AlwaysSeparateRecordSeparatorPolicy is the go-to for this specific issue.
+
+Refine your LineMapper (and/or LineTokenizer) for content parsing. Once the reader provides correctly separated lines, your LineMapper's job is to apply the business logic to parse the content of each individual line, including handling any malformed quotes or other data anomalies within that single line.
+
+If your "CSV-like" file is highly irregular or severely malformed, consider using a dedicated third-party CSV parsing library (like Apache Commons CSV or OpenCSV) within your LineMapper. These libraries often have more robust options for handling quoting, escaping, and other CSV variations.
+
+By implementing a custom RecordSeparatorPolicy, you address the fundamental problem of line merging, allowing the rest of your Spring Batch processing (including your LineMapper) to work with correctly delineated records.
+
+
+
 public long countLines(String filePath) throws IOException {
     try (Stream<String> lines = Files.lines(Paths.get(filePath))) {
         return lines.skip(1).count(); // Skip header
